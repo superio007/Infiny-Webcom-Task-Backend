@@ -1,0 +1,45 @@
+{
+  "name": "bank-statement-api-backend",
+  "version": "1.0.0",
+  "description": "Production-grade API backend for processing bank statement PDFs using AWS Textract and Google Gemini AI",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix"
+  },
+  "keywords": [
+    "bank-statement",
+    "pdf-processing",
+    "aws-textract",
+    "gemini-ai",
+    "express",
+    "api"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.956.0",
+    "@aws-sdk/client-textract": "^3.956.0",
+    "@google/generative-ai": "^0.24.1",
+    "axios": "^1.13.2",
+    "compression": "^1.8.1",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "form-data": "^4.0.5",
+    "helmet": "^8.1.0",
+    "joi": "^18.0.2",
+    "morgan": "^1.10.1",
+    "multer": "^2.0.2",
+    "pdf-lib": "^1.17.1",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "eslint": "^9.39.2",
+    "nodemon": "^3.1.11"
+  }
+}
