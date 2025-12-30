@@ -1,10 +1,10 @@
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import multer from "multer";
-import axios from "axios";
-import FormData from "form-data";
-import { PDFDocument } from "pdf-lib";
+const express = require("express");
+const cors = require("cors");
+const dotenv = require("dotenv");
+const multer = require("multer");
+const axios = require("axios");
+const FormData = require("form-data");
+const { PDFDocument } = require("pdf-lib");
 
 dotenv.config();
 
