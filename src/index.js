@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import multer from "multer";
 import axios from "axios";
 import FormData from "form-data";
+import { PDFDocument } from "pdf-lib";
 
 dotenv.config();
 
@@ -19,22 +20,22 @@ app.listen(PORT, () => {
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-/* -------------------------------
-   PROMPT: ACCOUNT METADATA
--------------------------------- */
-const buildAccountMetaPrompt = (ocrText) => `
+/* =====================================================
+   PROMPTS
+===================================================== */
+
+const buildAccountMetaPrompt = (text) => `
 You are a strict JSON extractor.
 
 RULES:
 - Output ONLY valid JSON
-- No markdown
-- No backticks
+- No markdown, no backticks
 - No explanations
 - Do NOT guess
-- Copy text exactly as written
-- If a value is missing, use empty string
+- Copy text exactly
+- Empty string if missing
 
-OUTPUT SCHEMA:
+OUTPUT:
 {
   "bankName": "",
   "accountHolderName": "",
@@ -45,32 +46,24 @@ OUTPUT SCHEMA:
   "statementEndDate": ""
 }
 
-OCR TEXT:
+TEXT:
 """
-${ocrText}
+${text}
 """
 `;
 
-/* -------------------------------
-   PROMPT: TRANSACTIONS
--------------------------------- */
-const buildTransactionPrompt = (ocrText) => `
+const buildTransactionPrompt = (text) => `
 You are a JSON extraction engine.
 
-STRICT RULES:
+RULES:
 - Output ONLY JSON
-- No backticks
-- No explanations
+- No markdown, no explanations
 - Do NOT calculate balances
 - Copy values EXACTLY as seen
-- Each transaction can have ONLY ONE of:
-  - debitAmount OR creditAmount
-- runningBalance ONLY if explicitly present
-- If unclear, leave fields empty
+- Only ONE of debit or credit per row
 - Extract AT MOST 3 transactions
-- Stop extraction after 3 valid transactions
 
-OUTPUT SCHEMA:
+OUTPUT:
 {
   "transactions": [
     {
@@ -83,15 +76,16 @@ OUTPUT SCHEMA:
   ]
 }
 
-OCR TEXT:
+TEXT:
 """
-${ocrText}
+${text}
 """
 `;
 
-/* -------------------------------
-   SANITIZE LLM OUTPUT
--------------------------------- */
+/* =====================================================
+   HELPERS
+===================================================== */
+
 const sanitizeAndParseJSON = (raw, label) => {
   if (!raw) throw new Error(`${label}: empty LLM response`);
 
@@ -103,10 +97,6 @@ const sanitizeAndParseJSON = (raw, label) => {
     throw new Error(`${label}: truncated JSON`);
   }
 
-  if (!cleaned.startsWith("{") || !cleaned.endsWith("}")) {
-    throw new Error(`${label}: not valid JSON`);
-  }
-
   try {
     return JSON.parse(cleaned);
   } catch {
@@ -114,85 +104,155 @@ const sanitizeAndParseJSON = (raw, label) => {
   }
 };
 
-/* -------------------------------
-   SPLIT OCR INTO PAGES
--------------------------------- */
-const splitIntoPages = (text) => {
-  return text
-    .split(/Result for Image\/Page\s+\d+/i)
-    .map((p) => p.trim())
-    .filter(Boolean);
+const mergeMeta = (prev, curr) => {
+  if (!prev) return curr;
+  return {
+    bankName: curr.bankName || prev.bankName,
+    accountHolderName: curr.accountHolderName || prev.accountHolderName,
+    accountNumber: curr.accountNumber || prev.accountNumber,
+    accountType: curr.accountType || prev.accountType,
+    currency: curr.currency || prev.currency,
+    statementStartDate: curr.statementStartDate || prev.statementStartDate,
+    statementEndDate: curr.statementEndDate || prev.statementEndDate,
+  };
 };
 
-/* -------------------------------
+const isNewAccountHeader = (curr, prev) => {
+  if (!prev) return true;
+
+  if (curr.bankName && curr.bankName !== prev.bankName) return true;
+  if (curr.accountNumber && curr.accountNumber !== prev.accountNumber)
+    return true;
+
+  return false;
+};
+
+const buildAccountKey = (meta, pageIndex) => {
+  if (meta.accountNumber) {
+    return [
+      meta.bankName?.toLowerCase(),
+      meta.accountNumber?.toLowerCase(),
+      meta.accountHolderName?.toLowerCase(),
+    ].join("|");
+  }
+  return `unknown-account-${pageIndex}`;
+};
+
+/* =====================================================
+   PDF → PAGES
+===================================================== */
+
+const splitPdfIntoPages = async (pdfBuffer) => {
+  const srcDoc = await PDFDocument.load(pdfBuffer);
+  const pages = [];
+
+  for (let i = 0; i < srcDoc.getPageCount(); i++) {
+    const newDoc = await PDFDocument.create();
+    const [page] = await newDoc.copyPages(srcDoc, [i]);
+    newDoc.addPage(page);
+    const bytes = await newDoc.save();
+    pages.push(Buffer.from(bytes));
+  }
+
+  return pages;
+};
+
+/* =====================================================
    API ENDPOINT
--------------------------------- */
+===================================================== */
+
 app.post("/parse-bank-statement", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    /* ---- OCR ---- */
-    const form = new FormData();
-    form.append("file", req.file.buffer, {
-      filename: req.file.originalname,
-      contentType: req.file.mimetype,
-    });
+    /* ---------- PDF → PAGES ---------- */
+    const pageBuffers = await splitPdfIntoPages(req.file.buffer);
 
-    const ocrResponse = await axios.post(
-      "http://localhost:3000/server/ocr/",
-      form,
-      { headers: form.getHeaders() }
-    );
+    const accountsMap = {};
+    let lastKnownMeta = null;
+    let currentAccountKey = null;
 
-    const ocrText = ocrResponse?.data?.data?.text;
-    if (!ocrText) throw new Error("Empty OCR result");
+    /* ---------- PROCESS EACH PAGE ---------- */
+    for (let i = 0; i < pageBuffers.length; i++) {
+      const form = new FormData();
+      form.append("file", pageBuffers[i], {
+        filename: `page-${i + 1}.pdf`,
+        contentType: "application/pdf",
+      });
 
-    /* ---- LLM PASS 1: METADATA ---- */
-    const metaLLM = await axios.post("http://localhost:11434/api/generate", {
-      model: "llama3",
-      prompt: buildAccountMetaPrompt(ocrText),
-      stream: false,
-    });
+      /* ---------- OCR PER PAGE ---------- */
+      const ocrRes = await axios.post(process.env.OCR_URL, form, {
+        headers: form.getHeaders(),
+      });
 
-    const accountMeta = sanitizeAndParseJSON(metaLLM.data.response, "Metadata");
+      const pageText = ocrRes?.data?.data?.text;
+      if (!pageText) continue;
 
-    /* ---- LLM PASS 2: TRANSACTIONS (PAGE-WISE) ---- */
-    const pages = splitIntoPages(ocrText);
-    let allTransactions = [];
+      /* ---------- METADATA ---------- */
+      const metaLLM = await axios.post(process.env.LLM_URL, {
+        model: "llama3",
+        prompt: buildAccountMetaPrompt(pageText),
+        stream: false,
+      });
 
-    for (let i = 0; i < pages.length; i++) {
-      const pageText = pages[i];
+      const rawMeta = sanitizeAndParseJSON(
+        metaLLM.data.response,
+        `Metadata page ${i + 1}`
+      );
 
-      const txnLLM = await axios.post("http://localhost:11434/api/generate", {
+      let pageMeta;
+      if (isNewAccountHeader(rawMeta, lastKnownMeta)) {
+        pageMeta = rawMeta;
+      } else {
+        pageMeta = mergeMeta(lastKnownMeta, rawMeta);
+      }
+
+      const accountKey = buildAccountKey(pageMeta, i);
+
+      if (!accountsMap[accountKey]) {
+        accountsMap[accountKey] = {
+          meta: pageMeta,
+          transactions: [],
+        };
+      }
+
+      lastKnownMeta = pageMeta;
+      currentAccountKey = accountKey;
+
+      /* ---------- TRANSACTIONS ---------- */
+      const txnLLM = await axios.post(process.env.LLM_URL, {
         model: "llama3",
         prompt: buildTransactionPrompt(pageText),
         stream: false,
       });
 
-      const pageTxnData = sanitizeAndParseJSON(
+      const pageTxn = sanitizeAndParseJSON(
         txnLLM.data.response,
         `Transactions page ${i + 1}`
       );
 
-      allTransactions.push(...(pageTxnData.transactions || []));
+      accountsMap[currentAccountKey].transactions.push(
+        ...(pageTxn.transactions || [])
+      );
     }
 
-    /* ---- FINAL RESPONSE ---- */
-    const result = {
-      fileName: req.file.originalname,
-      accounts: [
-        {
-          ...accountMeta,
-          openingBalance: "",
-          closingBalance: "",
-          transactions: allTransactions,
-        },
-      ],
-    };
+    /* ---------- FINAL OUTPUT ---------- */
+    const accounts = Object.values(accountsMap).map((acc) => ({
+      ...acc.meta,
+      openingBalance: "",
+      closingBalance: "",
+      transactions: acc.transactions,
+    }));
 
-    res.json({ success: true, data: result });
+    res.json({
+      success: true,
+      data: {
+        fileName: req.file.originalname,
+        accounts,
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

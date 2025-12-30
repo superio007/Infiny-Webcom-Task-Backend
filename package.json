@@ -14,7 +14,8 @@
     "express": "^5.2.1",
     "form-data": "^4.0.5",
     "multer": "^2.0.2",
-    "nodemon": "^3.1.11"
+    "nodemon": "^3.1.11",
+    "pdf-lib": "^1.17.1"
   },
   "keywords": [],
   "author": "",
