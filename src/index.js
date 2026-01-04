@@ -13,8 +13,8 @@ dotenv.config();
 if (!process.env.OCR_API_KEY) {
   throw new Error("OCR_API_KEY missing");
 }
-if (!process.env.LLM_URL) {
-  throw new Error("LLM_URL missing");
+if (!process.env.GEMINI_API_KEY) {
+  throw new Error("GEMINI_API_KEY missing");
 }
 
 /* ================= APP SETUP ================= */
@@ -36,15 +36,16 @@ const upload = multer({ storage: multer.memoryStorage() });
 const buildAccountMetaPrompt = (text) => `
 You are a strict JSON extractor for bank statements.
 
-RULES:
-- Output ONLY valid JSON
-- No markdown, no explanations
-- Do NOT guess values
-- Empty string if missing
-- Look for account number patterns like:
-  - "Account No", "A/c No", "Account Number"
-  - Numbers with format: XXXXXXXXXXXX (10-18 digits)
-  - Numbers after "Savings A/c", "Current A/c"
+CRITICAL RULES:
+1. Output ONLY valid JSON - no markdown, no explanations
+2. Look for ALL account numbers on this page
+3. If multiple accounts exist, return the FIRST/PRIMARY account shown
+4. Account numbers often appear after "Account Number", "A/c No", or account type labels
+
+Common account number formats:
+- XXX-XXXXX-X (e.g., 803-01867-3)
+- XX-XXXXXP (e.g., 26-00803P)
+- XXXXXXXXXXXX (10-18 digits)
 
 OUTPUT FORMAT:
 {
@@ -54,8 +55,11 @@ OUTPUT FORMAT:
   "accountType": "",
   "currency": "",
   "statementStartDate": "",
-  "statementEndDate": ""
+  "statementEndDate": "",
+  "additionalAccounts": []
 }
+
+If you see multiple account numbers, list them in "additionalAccounts" array.
 
 TEXT:
 """
@@ -100,31 +104,57 @@ ${text}
 
 /* ================= HELPERS ================= */
 
-const extractLLMText = (res) => {
-  if (res.data?.response) return res.data.response;
-  if (res.data?.choices?.[0]?.text) return res.data.choices[0].text;
-  throw new Error("Unknown LLM response format");
-};
-
 const callLLM = async (prompt, label) => {
   try {
+    const geminiApiKey = process.env.GEMINI_API_KEY;
+    const modelId = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${geminiApiKey}`;
+
     const response = await axios.post(
-      process.env.LLM_URL,
+      endpoint,
       {
-        model: "llama3",
-        prompt,
-        stream: false,
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: prompt }],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 4096,
+        },
+      },
+      {
+        headers: { "Content-Type": "application/json" },
+        timeout: 120000,
       }
-      // { timeout: 120000 }
     );
-    return extractLLMText(response);
+
+    // Extract text from Gemini response
+    const candidates = response.data?.candidates;
+    if (candidates && candidates[0]?.content?.parts?.[0]?.text) {
+      return candidates[0].content.parts[0].text;
+    }
+
+    throw new Error("Unknown Gemini response format");
   } catch (err) {
-    if (err.code === "ECONNREFUSED") {
+    if (err.response?.status === 400) {
       throw new Error(
-        `LLM server not running. Start Ollama with: ollama serve`
+        `Gemini API error: ${
+          err.response?.data?.error?.message || "Bad request"
+        }`
       );
     }
-    throw new Error(`${label} LLM call failed: ${err.message}`);
+    if (err.response?.status === 401 || err.response?.status === 403) {
+      throw new Error(
+        "Gemini authentication failed. Check GEMINI_API_KEY in .env"
+      );
+    }
+    if (err.response?.status === 429) {
+      throw new Error("Gemini rate limit exceeded. Please wait and try again.");
+    }
+    throw new Error(`${label} Gemini call failed: ${err.message}`);
   }
 };
 
@@ -145,13 +175,51 @@ const parseLLMJSON = (raw, label) => {
     .replace(/,\s*}/g, "}") // Remove trailing commas before }
     .replace(/,\s*]/g, "]") // Remove trailing commas before ]
     .replace(/[\r\n]+/g, " ") // Replace newlines with spaces
-    .replace(/\s+/g, " "); // Normalize whitespace
+    .replace(/\s+/g, " ") // Normalize whitespace
+    .replace(/"\s*,\s*,/g, '",') // Fix double commas
+    .replace(/,\s*,/g, ",") // Remove duplicate commas
+    .replace(/\[\s*,/g, "[") // Remove leading comma in arrays
+    .replace(/{\s*,/g, "{"); // Remove leading comma in objects
 
   try {
     return JSON.parse(jsonStr);
   } catch (e) {
+    // Try to fix common issues and retry
+    try {
+      // Sometimes LLM outputs incomplete JSON, try to fix arrays
+      if (jsonStr.includes('"transactions"')) {
+        // Find the transactions array and ensure it's properly closed
+        const txnStart = jsonStr.indexOf('"transactions"');
+        if (txnStart !== -1) {
+          const arrayStart = jsonStr.indexOf("[", txnStart);
+          if (arrayStart !== -1) {
+            let depth = 0;
+            let lastValidPos = arrayStart;
+            for (let i = arrayStart; i < jsonStr.length; i++) {
+              if (jsonStr[i] === "[") depth++;
+              if (jsonStr[i] === "]") depth--;
+              if (depth === 0) {
+                lastValidPos = i;
+                break;
+              }
+              if (jsonStr[i] === "}" && depth === 1) {
+                lastValidPos = i;
+              }
+            }
+            // Reconstruct valid JSON
+            const fixedJson = jsonStr.substring(0, lastValidPos + 1) + "]}";
+            return JSON.parse(fixedJson);
+          }
+        }
+      }
+    } catch (e2) {
+      // Ignore retry errors
+    }
+
     console.error(`${label}: JSON parse error - ${e.message}`);
-    console.error(`Raw JSON: ${jsonStr.substring(0, 200)}...`);
+    console.error(
+      `Raw JSON (first 300 chars): ${jsonStr.substring(0, 300)}...`
+    );
     throw new Error(`${label}: invalid JSON - ${e.message}`);
   }
 };
@@ -195,28 +263,34 @@ const extractTransactionBlock = (text) => {
   return text;
 };
 
-// Extract account number from OCR text using regex patterns
-const extractAccountNumberFromText = (text) => {
+// Extract ALL account numbers from OCR text using regex patterns
+const extractAllAccountNumbersFromText = (text) => {
+  const accountNumbers = new Set();
+
   // Common patterns for account numbers in bank statements
   const patterns = [
-    // "Account No: 123456789012" or "A/c No: 123456789012"
-    /(?:account\s*(?:no|number|#)|a\/c\s*(?:no|number|#))\s*[:\-]?\s*(\d{8,18})/i,
-    // "Savings A/c 123456789012" or "Current A/c 123456789012"
-    /(?:savings|current|checking)\s*a\/c\s*[:\-]?\s*(\d{8,18})/i,
-    // "Account: 123456789012"
-    /account\s*[:\-]\s*(\d{8,18})/i,
-    // Standalone long number that looks like account number (10-18 digits)
-    /\b(\d{10,18})\b/,
+    // Account patterns like XXX-XXXXX-X (e.g., 803-01867-3)
+    /\b(\d{3}-\d{5}-\d)\b/g,
+    // Account patterns like XXX-XXXXX-X with letters
+    /\b(\d{3}-\d{5}-[A-Z0-9])\b/gi,
   ];
 
   for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match && match[1]) {
-      return match[1];
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      if (match[1]) {
+        accountNumbers.add(match[1]);
+      }
     }
   }
 
-  return null;
+  return Array.from(accountNumbers);
+};
+
+// Extract single account number from OCR text using regex patterns
+const extractAccountNumberFromText = (text) => {
+  const allAccounts = extractAllAccountNumbersFromText(text);
+  return allAccounts.length > 0 ? allAccounts[0] : null;
 };
 
 /* ================= API ================= */
@@ -281,11 +355,70 @@ app.post("/parse-bank-statement", upload.single("file"), async (req, res) => {
 
       const meta = parseLLMJSON(metaRaw, `Metadata page ${i + 1}`);
 
-      // Try to get account number from LLM, then regex fallback, then previous page
+      // Debug: write to file
+      fs.appendFileSync(
+        "debug.log",
+        `\nPage ${i + 1} metadata: ${JSON.stringify(meta, null, 2)}\n`
+      );
+
+      // Try to get account number - prefer regex (more reliable) over LLM
+      const regexAccounts = extractAllAccountNumbersFromText(pageText);
       let accountNumber =
-        meta.accountNumber ||
-        extractAccountNumberFromText(pageText) ||
-        activeAccountNumber;
+        regexAccounts[0] || meta.accountNumber || activeAccountNumber;
+
+      fs.appendFileSync(
+        "debug.log",
+        `Page ${i + 1} account number resolved: ${accountNumber}\n`
+      );
+
+      // Find ALL account numbers on this page using regex
+      fs.appendFileSync(
+        "debug.log",
+        `Page ${i + 1} all accounts found: ${JSON.stringify(regexAccounts)}\n`
+      );
+
+      // Create entries for all accounts found on this page
+      for (const acctNum of regexAccounts) {
+        if (!accounts[acctNum]) {
+          accounts[acctNum] = {
+            accountNumber: acctNum,
+            bankName: meta.bankName || "",
+            accountHolderName: meta.accountHolderName || "",
+            accountType: "",
+            currency: meta.currency || "",
+            statementStartDate: meta.statementStartDate || "",
+            statementEndDate: meta.statementEndDate || "",
+            transactions: [],
+          };
+        }
+      }
+
+      // Handle additional accounts from LLM response (only if they match our pattern)
+      if (meta.additionalAccounts && Array.isArray(meta.additionalAccounts)) {
+        for (const addlAcct of meta.additionalAccounts) {
+          // Only add if it matches the XXX-XXXXX-X pattern
+          if (
+            addlAcct &&
+            /^\d{3}-\d{5}-\d$/.test(addlAcct) &&
+            !accounts[addlAcct]
+          ) {
+            accounts[addlAcct] = {
+              accountNumber: addlAcct,
+              bankName: meta.bankName || "",
+              accountHolderName: meta.accountHolderName || "",
+              accountType: "",
+              currency: meta.currency || "",
+              statementStartDate: meta.statementStartDate || "",
+              statementEndDate: meta.statementEndDate || "",
+              transactions: [],
+            };
+            fs.appendFileSync(
+              "debug.log",
+              `Page ${i + 1} additional account found: ${addlAcct}\n`
+            );
+          }
+        }
+      }
 
       // If still no account number, generate a temporary one based on bank name
       if (!accountNumber) {
