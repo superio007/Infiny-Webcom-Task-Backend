@@ -78,3 +78,184 @@ Page 1 metadata: {
 }
 Page 1 account number resolved: 109001516845
 Page 1 all accounts found: []
+
+Page 1 metadata: {
+  "bankName": "HSBC",
+  "accountHolderName": "John Wick",
+  "accountNumber": "26-00803P",
+  "accountType": "HSBC Premier",
+  "currency": "USD",
+  "statementStartDate": "August 15, 2014",
+  "statementEndDate": "September 15, 2014",
+  "additionalAccounts": [
+    "803-01867-3",
+    "803-46845-8",
+    "09653102271"
+  ]
+}
+Page 1 account number resolved: 803-01867-3
+Page 1 all accounts found: ["803-01867-3","803-46845-8"]
+
+Page 2 metadata: {
+  "bankName": "HSBC",
+  "accountHolderName": "John Wick",
+  "accountNumber": "803-01867-3",
+  "accountType": "HSBC PREMIER",
+  "currency": "USD",
+  "statementStartDate": "2014-08-15",
+  "statementEndDate": "2014-09-15",
+  "additionalAccounts": [
+    "803-46845-8"
+  ]
+}
+Page 2 account number resolved: 803-01867-3
+Page 2 all accounts found: ["803-01867-3","803-46845-8"]
+
+Page 1 metadata: {
+  "bankName": "ICICI Bank",
+  "accountHolderName": "MR.KIRAN PRAMOD DHOKE",
+  "accountNumber": "109001516845",
+  "accountType": "Savings Account",
+  "currency": "INR",
+  "statementStartDate": "September 08, 2025",
+  "statementEndDate": "December 08, 2025",
+  "additionalAccounts": []
+}
+Page 1 account number resolved: 109001516845
+Page 1 all accounts found: []
+
+Page 2 metadata: {
+  "bankName": "HDFC BANK",
+  "accountHolderName": "MR KIRAN PRAMOD DHOKE",
+  "accountNumber": "50100766701100",
+  "accountType": "SAVINGS A/C- RESIDENT(100)",
+  "currency": "INR",
+  "statementStartDate": "01/04/2025",
+  "statementEndDate": "30/09/2025",
+  "additionalAccounts": [
+    "301855437",
+    "510689248614",
+    "103396644771",
+    "103495738331",
+    "103576582001",
+    "103664516026",
+    "103748614064",
+    "511747373776",
+    "52170325058",
+    "522500197220"
+  ]
+}
+Page 2 account number resolved: 50100766701100
+Page 2 all accounts found: []
+
+Page 1 metadata: {
+  "bankName": "ICICI Bank",
+  "accountHolderName": "MR. KIRAN PRAMOD DHOKE",
+  "accountNumber": "109001516845",
+  "accountType": "Savings A/c",
+  "currency": "INR",
+  "statementStartDate": "September 08, 2025",
+  "statementEndDate": "December 08, 2025",
+  "additionalAccounts": []
+}
+Page 1 account number resolved: 109001516845
+Page 1 all accounts found: []
+
+Page 1 metadata: {
+  "bankName": "ICICI Bank",
+  "accountHolderName": "MR. KIRAN PRAMOD DHOKE",
+  "accountNumber": "109001516845",
+  "accountType": "Savings A/c",
+  "currency": "INR",
+  "statementStartDate": "September 08, 2025",
+  "statementEndDate": "December 08, 2025",
+  "additionalAccounts": []
+}
+Page 1 account number resolved: 109001516845
+Page 1 all accounts found: []
+
+Page 1 metadata: {
+  "bankName": "ICICI Bank",
+  "accountHolderName": "MR. KIRAN PRAMOD DHOKE",
+  "accountNumber": "109001516845",
+  "accountType": "Savings A/c",
+  "currency": "INR",
+  "statementStartDate": "September 08, 2025",
+  "statementEndDate": "December 08, 2025",
+  "additionalAccounts": [
+    "403562777143"
+  ]
+}
+Page 1 account number resolved: 109001516845
+Page 1 all accounts found: []
+
+Page 1 metadata: {
+  "bankName": "ICICI Bank",
+  "accountHolderName": "MR. KIRAN PRAMOD DHOKE",
+  "accountNumber": "109001516845",
+  "accountType": "Savings A/c",
+  "currency": "INR",
+  "statementStartDate": "September 08, 2025",
+  "statementEndDate": "December 08, 2025",
+  "additionalAccounts": []
+}
+Page 1 account number resolved: 109001516845
+Page 1 all accounts found: []
+
+Page 2 metadata: {
+  "bankName": "",
+  "accountHolderName": "",
+  "accountNumber": "",
+  "accountType": "",
+  "currency": "",
+  "statementStartDate": "",
+  "statementEndDate": "",
+  "additionalAccounts": []
+}
+Page 2 account number resolved: 109001516845
+Page 2 all accounts found: []
+
+Page 3 metadata: {
+  "bankName": "ICICI Bank",
+  "accountHolderName": "MR. KIRAN PRAMOD DHOKE",
+  "accountNumber": "109001516845",
+  "accountType": "Savings",
+  "currency": "",
+  "statementStartDate": "",
+  "statementEndDate": "",
+  "additionalAccounts": []
+}
+Page 3 account number resolved: 109001516845
+Page 3 all accounts found: []
+
+Page 1 metadata: {
+  "bankName": "HSBC",
+  "accountHolderName": "John Wick",
+  "accountNumber": "803-01867-3",
+  "accountType": "HSBC Premier Checking",
+  "currency": "USD",
+  "statementStartDate": "August 15, 2014",
+  "statementEndDate": "September 15, 2014",
+  "additionalAccounts": [
+    "26-00803P",
+    "803-46845-8",
+    "09653102271"
+  ]
+}
+Page 1 account number resolved: 803-01867-3
+Page 1 all accounts found: ["803-01867-3","803-46845-8"]
+
+Page 2 metadata: {
+  "bankName": "HSBC",
+  "accountHolderName": "John Wick",
+  "accountNumber": "803-01867-3",
+  "accountType": "HSBC PREMIER",
+  "currency": "USD",
+  "statementStartDate": "August 15, 2014",
+  "statementEndDate": "September 15, 2014",
+  "additionalAccounts": [
+    "803-46845-8"
+  ]
+}
+Page 2 account number resolved: 803-01867-3
+Page 2 all accounts found: ["803-01867-3","803-46845-8"]

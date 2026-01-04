@@ -5,6 +5,7 @@ const multer = require("multer");
 const axios = require("axios");
 const FormData = require("form-data");
 const { PDFDocument } = require("pdf-lib");
+const fs = require("fs");
 
 dotenv.config();
 
@@ -306,104 +307,101 @@ app.post("/parse-bank-statement", upload.single("file"), async (req, res) => {
     let activeAccountNumber = null;
 
     for (let i = 0; i < pages.length; i++) {
-      /* ---------- OCR ---------- */
+      try {
+        /* ---------- OCR ---------- */
 
-      const form = new FormData();
-      form.append("file", pages[i], {
-        filename: `page-${i + 1}.pdf`,
-        contentType: "application/pdf",
-      });
-      form.append("language", "eng");
-      form.append("isOverlayRequired", "false");
-      form.append("OCREngine", "2");
+        const form = new FormData();
+        form.append("file", pages[i], {
+          filename: `page-${i + 1}.pdf`,
+          contentType: "application/pdf",
+        });
+        form.append("language", "eng");
+        form.append("isOverlayRequired", "false");
+        form.append("OCREngine", "2");
 
-      const ocrRes = await axios.post(
-        "https://api.ocr.space/parse/image",
-        form,
-        {
-          headers: {
-            ...form.getHeaders(),
-            apikey: process.env.OCR_API_KEY,
-          },
-          maxContentLength: Infinity,
-          maxBodyLength: Infinity,
-          timeout: 60000,
-        }
-      );
-
-      if (ocrRes.data.IsErroredOnProcessing) {
-        throw new Error(
-          `OCR failed on page ${i + 1}: ${
-            ocrRes.data.ErrorMessage || "Unknown OCR error"
-          }`
+        const ocrRes = await axios.post(
+          "https://api.ocr.space/parse/image",
+          form,
+          {
+            headers: {
+              ...form.getHeaders(),
+              apikey: process.env.OCR_API_KEY,
+            },
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity,
+            timeout: 160000,
+          }
         );
-      }
 
-      const pageText =
-        ocrRes.data.ParsedResults?.map((r) => r.ParsedText)
-          .join("\n")
-          .trim() || "";
-
-      if (!pageText) continue;
-
-      /* ---------- METADATA ---------- */
-
-      const metaRaw = await callLLM(
-        buildAccountMetaPrompt(pageText),
-        `Metadata page ${i + 1}`
-      );
-
-      const meta = parseLLMJSON(metaRaw, `Metadata page ${i + 1}`);
-
-      // Debug: write to file
-      fs.appendFileSync(
-        "debug.log",
-        `\nPage ${i + 1} metadata: ${JSON.stringify(meta, null, 2)}\n`
-      );
-
-      // Try to get account number - prefer regex (more reliable) over LLM
-      const regexAccounts = extractAllAccountNumbersFromText(pageText);
-      let accountNumber =
-        regexAccounts[0] || meta.accountNumber || activeAccountNumber;
-
-      fs.appendFileSync(
-        "debug.log",
-        `Page ${i + 1} account number resolved: ${accountNumber}\n`
-      );
-
-      // Find ALL account numbers on this page using regex
-      fs.appendFileSync(
-        "debug.log",
-        `Page ${i + 1} all accounts found: ${JSON.stringify(regexAccounts)}\n`
-      );
-
-      // Create entries for all accounts found on this page
-      for (const acctNum of regexAccounts) {
-        if (!accounts[acctNum]) {
-          accounts[acctNum] = {
-            accountNumber: acctNum,
-            bankName: meta.bankName || "",
-            accountHolderName: meta.accountHolderName || "",
-            accountType: "",
-            currency: meta.currency || "",
-            statementStartDate: meta.statementStartDate || "",
-            statementEndDate: meta.statementEndDate || "",
-            transactions: [],
-          };
+        if (ocrRes.data.IsErroredOnProcessing) {
+          console.warn(
+            `OCR failed on page ${i + 1}: ${
+              ocrRes.data.ErrorMessage || "Unknown OCR error"
+            }`
+          );
+          continue;
         }
-      }
 
-      // Handle additional accounts from LLM response (only if they match our pattern)
-      if (meta.additionalAccounts && Array.isArray(meta.additionalAccounts)) {
-        for (const addlAcct of meta.additionalAccounts) {
-          // Only add if it matches the XXX-XXXXX-X pattern
-          if (
-            addlAcct &&
-            /^\d{3}-\d{5}-\d$/.test(addlAcct) &&
-            !accounts[addlAcct]
-          ) {
-            accounts[addlAcct] = {
-              accountNumber: addlAcct,
+        const pageText =
+          ocrRes.data.ParsedResults?.map((r) => r.ParsedText)
+            .join("\n")
+            .trim() || "";
+
+        if (!pageText) continue;
+
+        /* ---------- METADATA ---------- */
+
+        let meta = {
+          bankName: "",
+          accountHolderName: "",
+          accountNumber: "",
+          accountType: "",
+          currency: "",
+          statementStartDate: "",
+          statementEndDate: "",
+          additionalAccounts: [],
+        };
+
+        try {
+          const metaRaw = await callLLM(
+            buildAccountMetaPrompt(pageText),
+            `Metadata page ${i + 1}`
+          );
+          const parsedMeta = parseLLMJSON(metaRaw, `Metadata page ${i + 1}`);
+          meta = { ...meta, ...parsedMeta };
+        } catch (metaErr) {
+          console.warn(
+            `Metadata extraction failed for page ${i + 1}: ${metaErr.message}`
+          );
+        }
+
+        // Debug: write to file
+        fs.appendFileSync(
+          "debug.log",
+          `\nPage ${i + 1} metadata: ${JSON.stringify(meta, null, 2)}\n`
+        );
+
+        // Try to get account number - prefer regex (more reliable) over LLM
+        const regexAccounts = extractAllAccountNumbersFromText(pageText);
+        let accountNumber =
+          regexAccounts[0] || meta.accountNumber || activeAccountNumber;
+
+        fs.appendFileSync(
+          "debug.log",
+          `Page ${i + 1} account number resolved: ${accountNumber}\n`
+        );
+
+        // Find ALL account numbers on this page using regex
+        fs.appendFileSync(
+          "debug.log",
+          `Page ${i + 1} all accounts found: ${JSON.stringify(regexAccounts)}\n`
+        );
+
+        // Create entries for all accounts found on this page
+        for (const acctNum of regexAccounts) {
+          if (!accounts[acctNum]) {
+            accounts[acctNum] = {
+              accountNumber: acctNum,
               bankName: meta.bankName || "",
               accountHolderName: meta.accountHolderName || "",
               accountType: "",
@@ -412,50 +410,82 @@ app.post("/parse-bank-statement", upload.single("file"), async (req, res) => {
               statementEndDate: meta.statementEndDate || "",
               transactions: [],
             };
-            fs.appendFileSync(
-              "debug.log",
-              `Page ${i + 1} additional account found: ${addlAcct}\n`
-            );
           }
         }
-      }
 
-      // If still no account number, generate a temporary one based on bank name
-      if (!accountNumber) {
-        accountNumber = `UNKNOWN-${meta.bankName || "BANK"}-${Date.now()}`;
-        console.log(
-          `Warning: Could not extract account number, using temporary: ${accountNumber}`
-        );
-      }
+        // Handle additional accounts from LLM response (only if they match our pattern)
+        if (meta.additionalAccounts && Array.isArray(meta.additionalAccounts)) {
+          for (const addlAcct of meta.additionalAccounts) {
+            // Only add if it matches the XXX-XXXXX-X pattern
+            if (
+              addlAcct &&
+              /^\d{3}-\d{5}-\d$/.test(addlAcct) &&
+              !accounts[addlAcct]
+            ) {
+              accounts[addlAcct] = {
+                accountNumber: addlAcct,
+                bankName: meta.bankName || "",
+                accountHolderName: meta.accountHolderName || "",
+                accountType: "",
+                currency: meta.currency || "",
+                statementStartDate: meta.statementStartDate || "",
+                statementEndDate: meta.statementEndDate || "",
+                transactions: [],
+              };
+              fs.appendFileSync(
+                "debug.log",
+                `Page ${i + 1} additional account found: ${addlAcct}\n`
+              );
+            }
+          }
+        }
 
-      activeAccountNumber = accountNumber;
+        // If still no account number, generate a temporary one based on bank name
+        if (!accountNumber) {
+          accountNumber = `UNKNOWN-${meta.bankName || "BANK"}-${Date.now()}`;
+          console.log(
+            `Warning: Could not extract account number, using temporary: ${accountNumber}`
+          );
+        }
 
-      if (!accounts[accountNumber]) {
-        accounts[accountNumber] = {
-          accountNumber,
-          bankName: meta.bankName || "",
-          accountHolderName: meta.accountHolderName || "",
-          accountType: meta.accountType || "",
-          currency: meta.currency || "",
-          statementStartDate: meta.statementStartDate || "",
-          statementEndDate: meta.statementEndDate || "",
-          transactions: [],
-        };
-      }
+        activeAccountNumber = accountNumber;
 
-      /* ---------- TRANSACTIONS ---------- */
+        if (!accounts[accountNumber]) {
+          accounts[accountNumber] = {
+            accountNumber,
+            bankName: meta.bankName || "",
+            accountHolderName: meta.accountHolderName || "",
+            accountType: meta.accountType || "",
+            currency: meta.currency || "",
+            statementStartDate: meta.statementStartDate || "",
+            statementEndDate: meta.statementEndDate || "",
+            transactions: [],
+          };
+        }
 
-      const txnText = extractTransactionBlock(pageText);
-      if (!txnText) continue;
+        /* ---------- TRANSACTIONS ---------- */
 
-      const txnRaw = await callLLM(
-        buildTransactionPrompt(txnText),
-        `Transactions page ${i + 1}`
-      );
-      const txns = parseLLMJSON(txnRaw, `Transactions page ${i + 1}`);
+        const txnText = extractTransactionBlock(pageText);
+        if (!txnText) continue;
 
-      if (Array.isArray(txns.transactions)) {
-        accounts[accountNumber].transactions.push(...txns.transactions);
+        try {
+          const txnRaw = await callLLM(
+            buildTransactionPrompt(txnText),
+            `Transactions page ${i + 1}`
+          );
+          const txns = parseLLMJSON(txnRaw, `Transactions page ${i + 1}`);
+
+          if (txns && Array.isArray(txns.transactions)) {
+            accounts[accountNumber].transactions.push(...txns.transactions);
+          }
+        } catch (txnErr) {
+          console.warn(
+            `Transaction extraction failed for page ${i + 1}: ${txnErr.message}`
+          );
+        }
+      } catch (pageErr) {
+        console.warn(`Failed to process page ${i + 1}: ${pageErr.message}`);
+        // Continue to next page instead of failing entire request
       }
     }
 
