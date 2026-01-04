@@ -2,7 +2,7 @@
 
 A Node.js backend service that extracts structured data from PDF bank statements using OCR and AI-powered text analysis.
 
-**Live Demo:** https://infiny-webcom-task-backend.onrender.com
+**Live Demo:** https://infiny-webcom-task-frontend.vercel.app/
 
 ## Overview
 
