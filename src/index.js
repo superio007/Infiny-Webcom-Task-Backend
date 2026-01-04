@@ -8,6 +8,17 @@ const { PDFDocument } = require("pdf-lib");
 
 dotenv.config();
 
+/* ================= ENV VALIDATION ================= */
+
+if (!process.env.OCR_API_KEY) {
+  throw new Error("OCR_API_KEY missing");
+}
+if (!process.env.LLM_URL) {
+  throw new Error("LLM_URL missing");
+}
+
+/* ================= APP SETUP ================= */
+
 const app = express();
 const PORT = process.env.PORT || 4000;
 
@@ -20,22 +31,22 @@ app.listen(PORT, () => {
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-/* =====================================================
-   PROMPTS
-===================================================== */
+/* ================= PROMPTS ================= */
 
 const buildAccountMetaPrompt = (text) => `
-You are a strict JSON extractor.
+You are a strict JSON extractor for bank statements.
 
 RULES:
 - Output ONLY valid JSON
-- No markdown, no backticks
-- No explanations
-- Do NOT guess
-- Copy text exactly
+- No markdown, no explanations
+- Do NOT guess values
 - Empty string if missing
+- Look for account number patterns like:
+  - "Account No", "A/c No", "Account Number"
+  - Numbers with format: XXXXXXXXXXXX (10-18 digits)
+  - Numbers after "Savings A/c", "Current A/c"
 
-OUTPUT:
+OUTPUT FORMAT:
 {
   "bankName": "",
   "accountHolderName": "",
@@ -53,15 +64,20 @@ ${text}
 `;
 
 const buildTransactionPrompt = (text) => `
-You are a JSON extraction engine.
+You are a bank statement transaction normalizer.
+
+IMPORTANT:
+The OCR text has broken columns and misaligned values.
 
 RULES:
-- Output ONLY JSON
-- No markdown, no explanations
+- Output ONLY valid JSON
+- No markdown
+- No explanations
+- Preserve transaction order
+- Do NOT invent rows
+- Do NOT invent values
 - Do NOT calculate balances
-- Copy values EXACTLY as seen
-- Only ONE of debit or credit per row
-- Extract AT MOST 3 transactions
+- If unsure, leave fields empty
 
 OUTPUT:
 {
@@ -76,184 +92,247 @@ OUTPUT:
   ]
 }
 
-TEXT:
+OCR TEXT:
 """
 ${text}
 """
 `;
 
-/* =====================================================
-   HELPERS
-===================================================== */
+/* ================= HELPERS ================= */
 
-const sanitizeAndParseJSON = (raw, label) => {
-  if (!raw) throw new Error(`${label}: empty LLM response`);
+const extractLLMText = (res) => {
+  if (res.data?.response) return res.data.response;
+  if (res.data?.choices?.[0]?.text) return res.data.choices[0].text;
+  throw new Error("Unknown LLM response format");
+};
 
-  let cleaned = raw.replace(/```json|```/gi, "");
-  cleaned = cleaned.slice(cleaned.indexOf("{"));
-  cleaned = cleaned.slice(0, cleaned.lastIndexOf("}") + 1);
-
-  if (/\.\.\.\s*[\]}]/.test(cleaned)) {
-    throw new Error(`${label}: truncated JSON`);
+const callLLM = async (prompt, label) => {
+  try {
+    const response = await axios.post(
+      process.env.LLM_URL,
+      {
+        model: "llama3",
+        prompt,
+        stream: false,
+      }
+      // { timeout: 120000 }
+    );
+    return extractLLMText(response);
+  } catch (err) {
+    if (err.code === "ECONNREFUSED") {
+      throw new Error(
+        `LLM server not running. Start Ollama with: ollama serve`
+      );
+    }
+    throw new Error(`${label} LLM call failed: ${err.message}`);
   }
+};
+
+const parseLLMJSON = (raw, label) => {
+  if (!raw) throw new Error(`${label}: empty response`);
+
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+
+  if (start === -1 || end === -1) {
+    throw new Error(`${label}: invalid JSON`);
+  }
+
+  let jsonStr = raw.slice(start, end + 1);
+
+  // Clean up common LLM JSON issues
+  jsonStr = jsonStr
+    .replace(/,\s*}/g, "}") // Remove trailing commas before }
+    .replace(/,\s*]/g, "]") // Remove trailing commas before ]
+    .replace(/[\r\n]+/g, " ") // Replace newlines with spaces
+    .replace(/\s+/g, " "); // Normalize whitespace
 
   try {
-    return JSON.parse(cleaned);
-  } catch {
-    throw new Error(`${label}: JSON parse failed`);
+    return JSON.parse(jsonStr);
+  } catch (e) {
+    console.error(`${label}: JSON parse error - ${e.message}`);
+    console.error(`Raw JSON: ${jsonStr.substring(0, 200)}...`);
+    throw new Error(`${label}: invalid JSON - ${e.message}`);
   }
 };
 
-const mergeMeta = (prev, curr) => {
-  if (!prev) return curr;
-  return {
-    bankName: curr.bankName || prev.bankName,
-    accountHolderName: curr.accountHolderName || prev.accountHolderName,
-    accountNumber: curr.accountNumber || prev.accountNumber,
-    accountType: curr.accountType || prev.accountType,
-    currency: curr.currency || prev.currency,
-    statementStartDate: curr.statementStartDate || prev.statementStartDate,
-    statementEndDate: curr.statementEndDate || prev.statementEndDate,
-  };
-};
-
-const isNewAccountHeader = (curr, prev) => {
-  if (!prev) return true;
-
-  if (curr.bankName && curr.bankName !== prev.bankName) return true;
-  if (curr.accountNumber && curr.accountNumber !== prev.accountNumber)
-    return true;
-
-  return false;
-};
-
-const buildAccountKey = (meta, pageIndex) => {
-  if (meta.accountNumber) {
-    return [
-      meta.bankName?.toLowerCase(),
-      meta.accountNumber?.toLowerCase(),
-      meta.accountHolderName?.toLowerCase(),
-    ].join("|");
-  }
-  return `unknown-account-${pageIndex}`;
-};
-
-/* =====================================================
-   PDF → PAGES
-===================================================== */
-
-const splitPdfIntoPages = async (pdfBuffer) => {
-  const srcDoc = await PDFDocument.load(pdfBuffer);
+const splitPdfIntoPages = async (buffer) => {
+  const src = await PDFDocument.load(buffer);
   const pages = [];
 
-  for (let i = 0; i < srcDoc.getPageCount(); i++) {
-    const newDoc = await PDFDocument.create();
-    const [page] = await newDoc.copyPages(srcDoc, [i]);
-    newDoc.addPage(page);
-    const bytes = await newDoc.save();
-    pages.push(Buffer.from(bytes));
+  for (let i = 0; i < src.getPageCount(); i++) {
+    const doc = await PDFDocument.create();
+    const [page] = await doc.copyPages(src, [i]);
+    doc.addPage(page);
+    pages.push(Buffer.from(await doc.save()));
   }
 
   return pages;
 };
 
-/* =====================================================
-   API ENDPOINT
-===================================================== */
+const extractTransactionBlock = (text) => {
+  // Try multiple common patterns for transaction sections
+  const patterns = [
+    "Statement of Transactions",
+    "Transaction Details",
+    "Transaction History",
+    "Account Activity",
+    "Transactions",
+    "Date Description",
+    "Date Particulars",
+    "Value Date",
+  ];
+
+  for (const pattern of patterns) {
+    const idx = text.toLowerCase().indexOf(pattern.toLowerCase());
+    if (idx !== -1) {
+      return text.slice(idx);
+    }
+  }
+
+  // If no pattern found, return the full text for LLM to parse
+  // This handles cases where transactions start without a header
+  return text;
+};
+
+// Extract account number from OCR text using regex patterns
+const extractAccountNumberFromText = (text) => {
+  // Common patterns for account numbers in bank statements
+  const patterns = [
+    // "Account No: 123456789012" or "A/c No: 123456789012"
+    /(?:account\s*(?:no|number|#)|a\/c\s*(?:no|number|#))\s*[:\-]?\s*(\d{8,18})/i,
+    // "Savings A/c 123456789012" or "Current A/c 123456789012"
+    /(?:savings|current|checking)\s*a\/c\s*[:\-]?\s*(\d{8,18})/i,
+    // "Account: 123456789012"
+    /account\s*[:\-]\s*(\d{8,18})/i,
+    // Standalone long number that looks like account number (10-18 digits)
+    /\b(\d{10,18})\b/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+
+  return null;
+};
+
+/* ================= API ================= */
 
 app.post("/parse-bank-statement", upload.single("file"), async (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
+      return res.status(400).json({ error: "File missing" });
     }
 
-    /* ---------- PDF → PAGES ---------- */
-    const pageBuffers = await splitPdfIntoPages(req.file.buffer);
+    const pages = await splitPdfIntoPages(req.file.buffer);
+    const accounts = {};
+    let activeAccountNumber = null;
 
-    const accountsMap = {};
-    let lastKnownMeta = null;
-    let currentAccountKey = null;
+    for (let i = 0; i < pages.length; i++) {
+      /* ---------- OCR ---------- */
 
-    /* ---------- PROCESS EACH PAGE ---------- */
-    for (let i = 0; i < pageBuffers.length; i++) {
       const form = new FormData();
-      form.append("file", pageBuffers[i], {
+      form.append("file", pages[i], {
         filename: `page-${i + 1}.pdf`,
         contentType: "application/pdf",
       });
+      form.append("language", "eng");
+      form.append("isOverlayRequired", "false");
+      form.append("OCREngine", "2");
 
-      /* ---------- OCR PER PAGE ---------- */
-      const ocrRes = await axios.post(process.env.OCR_URL, form, {
-        headers: form.getHeaders(),
-      });
+      const ocrRes = await axios.post(
+        "https://api.ocr.space/parse/image",
+        form,
+        {
+          headers: {
+            ...form.getHeaders(),
+            apikey: process.env.OCR_API_KEY,
+          },
+          maxContentLength: Infinity,
+          maxBodyLength: Infinity,
+          timeout: 60000,
+        }
+      );
 
-      const pageText = ocrRes?.data?.data?.text;
+      if (ocrRes.data.IsErroredOnProcessing) {
+        throw new Error(
+          `OCR failed on page ${i + 1}: ${
+            ocrRes.data.ErrorMessage || "Unknown OCR error"
+          }`
+        );
+      }
+
+      const pageText =
+        ocrRes.data.ParsedResults?.map((r) => r.ParsedText)
+          .join("\n")
+          .trim() || "";
+
       if (!pageText) continue;
 
       /* ---------- METADATA ---------- */
-      const metaLLM = await axios.post(process.env.LLM_URL, {
-        model: "llama3",
-        prompt: buildAccountMetaPrompt(pageText),
-        stream: false,
-      });
 
-      const rawMeta = sanitizeAndParseJSON(
-        metaLLM.data.response,
+      const metaRaw = await callLLM(
+        buildAccountMetaPrompt(pageText),
         `Metadata page ${i + 1}`
       );
 
-      let pageMeta;
-      if (isNewAccountHeader(rawMeta, lastKnownMeta)) {
-        pageMeta = rawMeta;
-      } else {
-        pageMeta = mergeMeta(lastKnownMeta, rawMeta);
+      const meta = parseLLMJSON(metaRaw, `Metadata page ${i + 1}`);
+
+      // Try to get account number from LLM, then regex fallback, then previous page
+      let accountNumber =
+        meta.accountNumber ||
+        extractAccountNumberFromText(pageText) ||
+        activeAccountNumber;
+
+      // If still no account number, generate a temporary one based on bank name
+      if (!accountNumber) {
+        accountNumber = `UNKNOWN-${meta.bankName || "BANK"}-${Date.now()}`;
+        console.log(
+          `Warning: Could not extract account number, using temporary: ${accountNumber}`
+        );
       }
 
-      const accountKey = buildAccountKey(pageMeta, i);
+      activeAccountNumber = accountNumber;
 
-      if (!accountsMap[accountKey]) {
-        accountsMap[accountKey] = {
-          meta: pageMeta,
+      if (!accounts[accountNumber]) {
+        accounts[accountNumber] = {
+          accountNumber,
+          bankName: meta.bankName || "",
+          accountHolderName: meta.accountHolderName || "",
+          accountType: meta.accountType || "",
+          currency: meta.currency || "",
+          statementStartDate: meta.statementStartDate || "",
+          statementEndDate: meta.statementEndDate || "",
           transactions: [],
         };
       }
 
-      lastKnownMeta = pageMeta;
-      currentAccountKey = accountKey;
-
       /* ---------- TRANSACTIONS ---------- */
-      const txnLLM = await axios.post(process.env.LLM_URL, {
-        model: "llama3",
-        prompt: buildTransactionPrompt(pageText),
-        stream: false,
-      });
 
-      const pageTxn = sanitizeAndParseJSON(
-        txnLLM.data.response,
+      const txnText = extractTransactionBlock(pageText);
+      if (!txnText) continue;
+
+      const txnRaw = await callLLM(
+        buildTransactionPrompt(txnText),
         `Transactions page ${i + 1}`
       );
+      const txns = parseLLMJSON(txnRaw, `Transactions page ${i + 1}`);
 
-      accountsMap[currentAccountKey].transactions.push(
-        ...(pageTxn.transactions || [])
-      );
+      if (Array.isArray(txns.transactions)) {
+        accounts[accountNumber].transactions.push(...txns.transactions);
+      }
     }
-
-    /* ---------- FINAL OUTPUT ---------- */
-    const accounts = Object.values(accountsMap).map((acc) => ({
-      ...acc.meta,
-      openingBalance: "",
-      closingBalance: "",
-      transactions: acc.transactions,
-    }));
 
     res.json({
       success: true,
-      data: {
-        fileName: req.file.originalname,
-        accounts,
-      },
+      fileName: req.file.originalname,
+      accounts: Object.values(accounts),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Error details:", err);
+    res.status(500).json({ error: err.message, stack: err.stack });
   }
 });
